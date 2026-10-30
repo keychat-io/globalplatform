@@ -5,7 +5,9 @@ include(CMakeFindDependencyMacro)
 include("${CMAKE_CURRENT_LIST_DIR}/globalplatformTargets.cmake")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-find_dependency(PCSC)
+if(@GLOBALPLATFORM_WITH_PCSC@)
+  find_dependency(PCSC)
+endif()
 
 if(TARGET globalplatform::globalplatformStatic)
   find_dependency(OpenSSL)

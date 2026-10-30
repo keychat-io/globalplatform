@@ -42,10 +42,12 @@ extern "C"
 #endif
 
 #include <stdio.h>
+#ifndef OPGP_NO_PCSC
 #ifdef WIN32
 #include <WinSCard.h>
 #else
 #include <winscard.h>
+#endif
 #endif
 #include "unicode.h"
 #include "types.h"
@@ -60,8 +62,13 @@ extern "C"
 #define OPGP_TRACE_MODE_ENABLE 1 //!< Switch trace mode on
 #define OPGP_TRACE_MODE_DISABLE 0 //!< Switch trace mode off
 
+#ifdef OPGP_NO_PCSC
+#define OPGP_CARD_PROTOCOL_T0 1 //!< Transport protocol T=0
+#define OPGP_CARD_PROTOCOL_T1 2 //!< Transport protocol T=1
+#else
 #define OPGP_CARD_PROTOCOL_T0 SCARD_PROTOCOL_T0 //!< Transport protocol T=0
 #define OPGP_CARD_PROTOCOL_T1 SCARD_PROTOCOL_T1 //!< Transport protocol T=1
+#endif
 
 typedef struct OPGP_CARD_CONTEXT OPGP_CARD_CONTEXT;
 typedef struct OPGP_CARD_INFO OPGP_CARD_INFO;
@@ -91,6 +98,13 @@ typedef struct
 
 /**
  * Card context necessary for #OPGP_establish_context().
+ * With OPGP_STATIC_CALLBACKS, zero-initialize this structure and assign
+ * connectionFunctions.sendAPDU before calling OPGP_establish_context. Successful
+ * establishment initializes crypto and is required before other command APIs.
+ * Callbacks are preserved by establishment. Other callbacks
+ * are optional when their corresponding lifecycle/reader API is not used.
+ * The caller owns librarySpecific and must drain in-flight work before release.
+ * No connection plugin is loaded in this profile.
  */
 typedef struct OPGP_CARD_CONTEXT {
 	PVOID librarySpecific; //!< Library specific data.
@@ -118,7 +132,11 @@ typedef struct OPGP_CARD_INFO {
 OPGP_API
 void OPGP_enable_trace_mode(DWORD enable, FILE *out);
 
+#ifdef OPGP_NO_LOGGING
+#define traceEnable ((DWORD)0)
+#else
 extern DWORD traceEnable;
+#endif
 extern FILE *traceFile;
 
 //! \brief This function establishes a context to connection layer.

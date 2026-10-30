@@ -47,6 +47,19 @@
 #include <syslog.h>
 #endif
 
+#ifdef OPGP_NO_LOGGING
+/* Keep exported symbols inert even if the environment or callers enable logs. */
+void OPGP_log_Start(OPGP_STRING func, OPGP_STRING file, int line) {
+    (void)func; (void)file; (void)line;
+}
+void OPGP_log_Hex(OPGP_STRING msg, PBYTE buffer, DWORD bufferLength) {
+    (void)msg; (void)buffer; (void)bufferLength;
+}
+void OPGP_log_End(OPGP_STRING func, OPGP_STRING file, int line, OPGP_ERROR_STATUS status) {
+    (void)func; (void)file; (void)line; (void)status;
+}
+void OPGP_log_Msg(OPGP_STRING msg, ...) { (void)msg; }
+#else
 /**
 * The call is redirected to log_Log().
 * \param func [in] The function name.
@@ -178,3 +191,5 @@ filelog:
         fclose(fp);
     }
 }
+
+#endif /* OPGP_NO_LOGGING */

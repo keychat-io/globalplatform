@@ -6,6 +6,7 @@ includedir=${prefix}/include/globalplatform
 Name: GlobalPlatform Library 
 Description: GlobalPlatform Smart Card Management Library
 Version: @VERSION@ 
-Requires: libpcsclite
+Requires: @GLOBALPLATFORM_PC_REQUIRES@
+Requires.private: libcrypto zlib
 Libs: -lglobalplatform
 Cflags: -I${includedir}

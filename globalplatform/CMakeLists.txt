@@ -3,6 +3,23 @@ PROJECT(globalplatform C)
 
 cmake_policy(VERSION 3.10)
 
+option(STATIC "Build static variants only" OFF)
+option(GLOBALPLATFORM_WITH_PCSC "Build the PC/SC connection plugin" ON)
+option(GLOBALPLATFORM_STATIC_CALLBACKS "Use explicitly supplied callbacks without a plugin loader" OFF)
+option(GLOBALPLATFORM_ENABLE_LOGGING "Compile SDK debug and APDU trace output" ON)
+
+if(GLOBALPLATFORM_STATIC_CALLBACKS)
+  if(NOT STATIC OR GLOBALPLATFORM_WITH_PCSC OR TOOLS)
+    message(FATAL_ERROR "Static callbacks require STATIC=ON, GLOBALPLATFORM_WITH_PCSC=OFF, TOOLS=OFF")
+  endif()
+  # This profile may handle production keys and APDUs. Logging cannot be enabled.
+  set(GLOBALPLATFORM_ENABLE_LOGGING OFF CACHE BOOL "Compile SDK debug and APDU trace output" FORCE)
+endif()
+if(TOOLS AND NOT GLOBALPLATFORM_WITH_PCSC)
+  message(FATAL_ERROR "gpshell requires GLOBALPLATFORM_WITH_PCSC=ON")
+endif()
+
+
 SET( ${PROJECT_NAME}_CURRENT 8 )
 SET( ${PROJECT_NAME}_REVISION 0 )
 SET( ${PROJECT_NAME}_AGE 0 )
@@ -12,6 +29,12 @@ SET(SOVERSION "${${PROJECT_NAME}_CURRENT}")
 SET(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules/)
 
 set(CMAKE_MACOSX_RPATH 1)
+
+if(GLOBALPLATFORM_WITH_PCSC)
+  set(GLOBALPLATFORM_PC_REQUIRES "libpcsclite")
+else()
+  set(GLOBALPLATFORM_PC_REQUIRES "")
+endif()
 
 IF(UNIX)
     # Create PkgConfig file
@@ -36,7 +59,9 @@ endif()
 set(INSTALL_FILES	${CMAKE_CURRENT_SOURCE_DIR}/AUTHORS ${CMAKE_CURRENT_SOURCE_DIR}/ChangeLog
               ${CMAKE_CURRENT_SOURCE_DIR}/COPYING.LESSER
               ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
-              ${CMAKE_CURRENT_SOURCE_DIR}/NEWS ${CMAKE_CURRENT_SOURCE_DIR}/README.md)
+              ${CMAKE_CURRENT_SOURCE_DIR}/NEWS ${CMAKE_CURRENT_SOURCE_DIR}/README.md
+              ${CMAKE_CURRENT_SOURCE_DIR}/../COPYING
+              ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE.OpenSSL)
 
 INSTALL(FILES ${INSTALL_FILES} DESTINATION ${DOCUMENTATION_DIRECTORY})
 

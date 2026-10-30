@@ -43,6 +43,13 @@ extern "C"
 
 #include "globalplatform/library.h"
 
+#ifdef OPGP_STATIC_CALLBACKS
+#include "globalplatform/types.h"
+#include "globalplatform/error.h"
+/* Called by establish_context; returns an error instead of exiting the process. */
+OPGP_NO_API
+OPGP_ERROR_STATUS OPGP_initialize_crypto(void);
+#else
 //! \brief Handles the library initialization.
 OPGP_NO_API
 void init(void);
@@ -50,6 +57,7 @@ void init(void);
 //! \brief Handles the library deinitialization.
 OPGP_NO_API
 void fini(void);
+#endif
 
 #ifdef __cplusplus
 }
