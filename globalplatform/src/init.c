@@ -29,6 +29,10 @@
  */
 
 #include "init.h"
+#ifdef OPGP_STATIC_CALLBACKS
+#include "globalplatform/errorcodes.h"
+#include "globalplatform/stringify.h"
+#endif
 #include <openssl/opensslv.h>
 #if defined OPENSSL_VERSION_MAJOR && (OPENSSL_VERSION_MAJOR >= 3)
 #define OPENSSL3
@@ -38,8 +42,13 @@
 #include <openssl/provider.h>
 #include <openssl/crypto.h>
 
+#ifdef OPGP_STATIC_CALLBACKS
+static OSSL_PROVIDER *legacy;
+static OSSL_PROVIDER *deflt;
+#else
 OSSL_PROVIDER *legacy;
 OSSL_PROVIDER *deflt;
+#endif
 
 #ifdef WIN32
 #include <windows.h>
@@ -79,6 +88,40 @@ static int setLegacyProviderSearchPathFromModule(void) {
 #endif
 #endif
 
+#ifdef OPGP_STATIC_CALLBACKS
+#ifdef OPENSSL3
+static CRYPTO_ONCE cryptoOnce = CRYPTO_ONCE_STATIC_INIT;
+static int cryptoReady;
+
+static void initialize_crypto_once(void) {
+    if (!OPENSSL_init_crypto(0, NULL)) return;
+    deflt = OSSL_PROVIDER_load(NULL, "default");
+    legacy = OSSL_PROVIDER_load(NULL, "legacy");
+    if (deflt == NULL || legacy == NULL) {
+        OSSL_PROVIDER_unload(legacy);
+        OSSL_PROVIDER_unload(deflt);
+        legacy = NULL;
+        deflt = NULL;
+        return;
+    }
+    /* Providers have process lifetime; a card context does not own libcrypto. */
+    cryptoReady = 1;
+}
+#endif
+
+OPGP_ERROR_STATUS OPGP_initialize_crypto(void) {
+    OPGP_ERROR_STATUS status;
+#ifdef OPENSSL3
+    if (!CRYPTO_THREAD_run_once(&cryptoOnce, initialize_crypto_once) || !cryptoReady) {
+        OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_CRYPT,
+            OPGP_stringify_error(OPGP_ERROR_CRYPT));
+        return status;
+    }
+#endif
+    OPGP_ERROR_CREATE_NO_ERROR(status);
+    return status;
+}
+#else
 /**
  * Checks the OpenSSL version and enables necessary legacy algorithms.
  */
@@ -124,3 +167,5 @@ DESTRUCTOR void fini(void) {
 	OPENSSL_cleanup();
 #endif
 }
+
+#endif /* OPGP_STATIC_CALLBACKS */

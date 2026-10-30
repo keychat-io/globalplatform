@@ -29,7 +29,12 @@
  */
 
 #include "globalplatform/connection.h"
+#ifdef OPGP_STATIC_CALLBACKS
+#include "init.h"
+#endif
+#ifndef OPGP_STATIC_CALLBACKS
 #include "dyn_generic.h"
+#endif
 #include "globalplatform/globalplatform.h"
 #include "globalplatform/debug.h"
 #include "globalplatform/stringify.h"
@@ -39,7 +44,9 @@
 #include <stdlib.h>
 #include "util.h"
 
+#ifndef OPGP_NO_LOGGING
 DWORD traceEnable; //!< Enable trace mode.
+#endif
 FILE *traceFile; //!< The trace file for trace mode.
 
 #define ASSIGN_FUNC_PTR(dest, src) do { \
@@ -56,11 +63,16 @@ FILE *traceFile; //!< The trace file for trace mode.
  * \param *out [out] The pointer to to FILE to print result.
  */
 void OPGP_enable_trace_mode(DWORD enable, FILE *out) {
+#ifdef OPGP_NO_LOGGING
+    (void)enable;
+    (void)out;
+#else
     if (out == NULL)
  		traceFile = stdout;
     else
  		traceFile = out;
     traceEnable = enable;
+#endif
 }
 
 /**
@@ -74,6 +86,22 @@ OPGP_ERROR_STATUS OPGP_establish_context(OPGP_CARD_CONTEXT *cardContext) {
 	OPGP_ERROR_STATUS(*plugin_establishContextFunction) (OPGP_CARD_CONTEXT *);
 
  OPGP_LOG_START(_T("OPGP_establish_context"));
+
+#ifdef OPGP_STATIC_CALLBACKS
+    if (cardContext == NULL || cardContext->connectionFunctions.sendAPDU == NULL ||
+        cardContext->libraryHandle != NULL) {
+        OPGP_ERROR_CREATE_ERROR(errorStatus, OPGP_ERROR_INVALID_RESPONSE_DATA,
+            _T("Static callbacks require a sendAPDU callback and no library handle."));
+        return errorStatus;
+    }
+    errorStatus = OPGP_initialize_crypto();
+    if (OPGP_ERROR_CHECK(errorStatus)) return errorStatus;
+    plugin_establishContextFunction = cardContext->connectionFunctions.establishContext;
+    if (plugin_establishContextFunction != NULL) {
+        errorStatus = (*plugin_establishContextFunction)(cardContext);
+    }
+    return errorStatus;
+#else
 
 #if defined(OPGP_STATIC_PCSC)
 	/* If statically linked PC/SC plugin is requested, wire symbols directly */
@@ -194,6 +222,7 @@ OPGP_ERROR_STATUS OPGP_establish_context(OPGP_CARD_CONTEXT *cardContext) {
 end:
 	OPGP_LOG_END(_T("OPGP_establish_context"), errorStatus);
     return errorStatus;
+#endif /* OPGP_STATIC_CALLBACKS */
 }
 
 /**
@@ -214,6 +243,7 @@ OPGP_ERROR_STATUS OPGP_release_context(OPGP_CARD_CONTEXT *cardContext) {
 			goto end;
 		}
 	}
+	#ifndef OPGP_STATIC_CALLBACKS
 	// only if handle is not NULL unload it
 	if (cardContext->libraryHandle != NULL) {
 		errorStatus = DYN_CloseLibrary(&cardContext->libraryHandle);
@@ -221,6 +251,7 @@ OPGP_ERROR_STATUS OPGP_release_context(OPGP_CARD_CONTEXT *cardContext) {
 			goto end;
 		}
 	}
+	#endif
 	cardContext->connectionFunctions.cardConnect = NULL;
 	cardContext->connectionFunctions.cardDisconnect = NULL;
 	cardContext->connectionFunctions.establishContext = NULL;
@@ -319,6 +350,7 @@ OPGP_ERROR_STATUS OPGP_send_APDU(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO c
 	OPGP_ERROR_STATUS(*plugin_sendAPDUFunction) (OPGP_CARD_CONTEXT, OPGP_CARD_INFO, PBYTE, DWORD, PBYTE, PDWORD);
 	PBYTE apduCommand = NULL;
 	DWORD apduCommandLength = capduLength + 128;
+	DWORD responseCapacity = *rapduLength;
 	DWORD errorCode;
 	int i=0;
 
@@ -363,6 +395,11 @@ OPGP_ERROR_STATUS OPGP_send_APDU(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO c
     } else {
         errorStatus = (*plugin_sendAPDUFunction) (cardContext, cardInfo, apduCommand, apduCommandLength, rapdu, rapduLength);
         if (OPGP_ERROR_CHECK(errorStatus)) {
+            goto end;
+        }
+        if (*rapduLength < 2 || *rapduLength > responseCapacity) {
+            OPGP_ERROR_CREATE_ERROR(errorStatus, OPGP_ERROR_INVALID_RESPONSE_DATA,
+                OPGP_stringify_error(OPGP_ERROR_INVALID_RESPONSE_DATA));
             goto end;
         }
         errorCode = errorStatus.errorCode;
@@ -422,6 +459,7 @@ OPGP_ERROR_STATUS OPGP_send_chained_APDU_extended(OPGP_CARD_CONTEXT cardContext,
 	DWORD wrappedLc = 0;
 	DWORD pos = 0;
 	DWORD errorCode = 0;
+	DWORD responseCapacity = *rapduLength;
 
 	OPGP_LOG_START(_T("OPGP_send_chained_APDU"));
 	plugin_sendAPDUFunction = cardContext.connectionFunctions.sendAPDU;
@@ -540,6 +578,12 @@ OPGP_ERROR_STATUS OPGP_send_chained_APDU_extended(OPGP_CARD_CONTEXT cardContext,
 		}
 
 		status = (*plugin_sendAPDUFunction)(cardContext, cardInfo, wrapped, wrappedLen, rapdu, &tmpRespLen);
+        if (OPGP_ERROR_CHECK(status)) { goto end; }
+        if (tmpRespLen < 2 || tmpRespLen > responseCapacity) {
+            OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INVALID_RESPONSE_DATA,
+                OPGP_stringify_error(OPGP_ERROR_INVALID_RESPONSE_DATA));
+            goto end;
+        }
 
 		if (traceEnable) {
 			_ftprintf(traceFile, _T("Extended response <-- "));
@@ -604,6 +648,14 @@ OPGP_ERROR_STATUS OPGP_send_chained_APDU_extended(OPGP_CARD_CONTEXT cardContext,
 			}
 
 			status = (*plugin_sendAPDUFunction)(cardContext, cardInfo, capduChunk, capduChunkLen, tmpResp, &tmpRespLen);
+            if (OPGP_ERROR_CHECK(status) || tmpRespLen < 2 || tmpRespLen > responseCapacity) {
+                free(capduChunk);
+                if (!OPGP_ERROR_CHECK(status)) {
+                    OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INVALID_RESPONSE_DATA,
+                        OPGP_stringify_error(OPGP_ERROR_INVALID_RESPONSE_DATA));
+                }
+                goto end;
+            }
 
 			if (traceEnable) {
 				_ftprintf(traceFile, _T("Chained response <-- "));

@@ -417,7 +417,7 @@ typedef struct {
 	OPGP_AID aid; //!< The AID.
 	BYTE lifeCycleState; //!< The Issuer Security Domain, Security Domains, Executable Load Files and Application life cycle state.
 	GP211_APPLICATION_PRIVILEGES privileges; //!< The Issuer Security Domain, Security Domains or Application privileges. Has no meaning for Executable Load Files.
-	BYTE versionNumber[2]; //!< On a Java Card based card, this is a 2-byte version number reflecting the major and minor version attributes (in this order) of the Java Card CAP file. Shorted if longer.
+	BYTE versionNumber[2]; //!< On a Java Card based card, this is a 2-byte version number reflecting the major and minor version attributes (in this order) of the Java Card CAP file. Legacy projection: zero when absent, left-padded when shorter, first two bytes when longer; use GP211_get_status_ex() for presence and raw CE.
 	OPGP_AID associatedSecurityDomainAID; //!< The associated Security Domain's AID.
 } GP211_APPLICATION_DATA;
 
@@ -427,11 +427,47 @@ typedef struct {
 typedef struct {
 	OPGP_AID aid; //!< The Executable Load File AID.
 	BYTE lifeCycleState; //!< The Executable Load File life cycle state.
-	BYTE versionNumber[2]; //!< On a Java Card based card, this is a 2-byte version number reflecting the major and minor version attributes (in this order) of the Java Card CAP file. Shorted if longer.
+	BYTE versionNumber[2]; //!< On a Java Card based card, this is a 2-byte version number reflecting the major and minor version attributes (in this order) of the Java Card CAP file. Legacy projection: zero when absent, left-padded when shorter, first two bytes when longer; use GP211_get_status_ex() for presence and raw CE.
 	BYTE numExecutableModules; //!< Number of associated Executable Modules.
 	OPGP_AID executableModules[64]; //!< Array for the maximum possible associated Executable Modules.
 	OPGP_AID associatedSecurityDomainAID; //!< The associated Security Domain's AID.
 } GP211_EXECUTABLE_MODULES_DATA;
+
+/** Bounded GET STATUS resource limits. Exceeding any limit fails the entire read. */
+#define GP211_STATUS_MAX_PAGES 64
+#define GP211_STATUS_MAX_BYTES 65536
+#define GP211_STATUS_MAX_ENTRIES 1024
+#define GP211_STATUS_MAX_MODULES 64
+
+/**
+ * A lossless view of the supported registry fields. Optional field presence is
+ * explicit. versionNumber is raw CE data, with no assumed encoding, and points
+ * into the owning GP211_REGISTRY_DATA response buffer until it is freed.
+ * Unknown TLVs remain available in that buffer. Legacy records have no C4/CC/CE.
+ */
+typedef struct {
+	OPGP_AID aid;
+	BYTE lifeCycleState;
+	BOOL privilegesPresent;
+	GP211_APPLICATION_PRIVILEGES privileges;
+	BOOL associatedSecurityDomainAIDPresent;
+	OPGP_AID associatedSecurityDomainAID;
+	BOOL executableLoadFileAIDPresent;
+	OPGP_AID executableLoadFileAID;
+	BOOL versionNumberPresent;
+	DWORD versionNumberLength;
+	const BYTE *versionNumber;
+	DWORD numExecutableModules;
+	OPGP_AID executableModules[GP211_STATUS_MAX_MODULES];
+} GP211_REGISTRY_ENTRY;
+
+/** Owned GET STATUS result. Treat all fields as read-only; free with GP211_free_status(). */
+typedef struct {
+	DWORD count;
+	GP211_REGISTRY_ENTRY *entries;
+	DWORD responseDataLength;
+	PBYTE responseData;
+} GP211_REGISTRY_DATA;
 
 /**
  * The structure containing the extended card resource information according ETSI TS 102 226, sect. 8.2.1.7.2.
@@ -815,11 +851,39 @@ OPGP_ERROR_STATUS OPGP_parse_extended_card_resources_information(const BYTE *dat
 /** \brief GlobalPlatform2.1.1: Gets the life cycle status of Applications, the Issuer Security
  * Domains, Security Domains and Executable Load Files and their privileges or information about
  * Executable Modules of the Executable Load Files.
+ * This compatibility API omits C4 and CE presence and projects CE into two bytes.
+ * Use GP211_get_status_ex() for complete supported fields. On failure dataLength
+ * is zero and output arrays are unchanged, including insufficient capacity.
  */
 OPGP_API
 OPGP_ERROR_STATUS GP211_get_status(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo, GP211_SECURITY_INFO *secInfo,
 				BYTE cardElement, BYTE format, GP211_APPLICATION_DATA *applData,
 				GP211_EXECUTABLE_MODULES_DATA *executableData, PDWORD dataLength);
+
+/**
+ * Read and validate the complete registry before publishing an owned result.
+ * *registry must be NULL on entry and remains NULL on failure. Only 9000 ends
+ * a read; nonempty 6310 pages continue list queries. An Issuer Security Domain
+ * query must return exactly one record in one 9000 response; 6310 is rejected
+ * without requesting another page. No format fallback or replay occurs.
+ * All other status words, including 6A88, return their card error without a
+ * result. A transport-aware adapter may classify empty first-page 6A88 for
+ * application/load-file queries; a later-page 6A88 never completes a list.
+ * AIDs must have 5..16 bytes. Applications/ISD require 4F, 9F70 and C5
+ * (C5 00 is an explicit empty privilege set); load files require 4F and 9F70.
+ * Known singleton fields may not repeat. Modules and entry AIDs must be unique.
+ * CE presence and arbitrary bounded nonempty raw bytes survive; empty CE is invalid.
+ * Limits above fail closed; no partial result is returned. This validates the
+ * returned format, not whether a card's legacy format exposes every optional fact.
+ */
+OPGP_API
+OPGP_ERROR_STATUS GP211_get_status_ex(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo,
+		GP211_SECURITY_INFO *secInfo, BYTE cardElement, BYTE format, GP211_REGISTRY_DATA **registry);
+
+/** Release a result from GP211_get_status_ex(); NULL is permitted. */
+OPGP_API
+void GP211_free_status(GP211_REGISTRY_DATA *registry);
+
 
 //! \brief GlobalPlatform2.1.1: Sets the life cycle status of Applications, Security Domains or the Card Manager.
 OPGP_API

@@ -51,7 +51,7 @@ extern "C"
 #define OPGP_LOG_FILENAME _T("/tmp/GlobalPlatform.log")
 #endif
 
-#ifdef OPGP_DEBUG
+#if defined(OPGP_DEBUG) && !defined(OPGP_NO_LOGGING)
 #define OPGP_LOG_START(msg)        OPGP_log_Start(msg, _T(__FILE__), __LINE__)
 #define OPGP_LOG_MSG(...)	OPGP_log_Msg(__VA_ARGS__)
 #define OPGP_LOG_END(msg, status)       OPGP_log_End(msg, _T(__FILE__), __LINE__, status)

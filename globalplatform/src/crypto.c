@@ -2831,6 +2831,13 @@ OPGP_ERROR_STATUS GP211_check_R_MAC(PBYTE apduCommand, DWORD apduCommandLength,
 	BYTE mac[8];
 	DWORD sw;
 	OPGP_LOG_START(_T("GP211_check_R_MAC"));
+    if (responseApdu == NULL || responseApduLength < 2 ||
+        unwrappedResponseApdu == NULL || unwrappedResponseApduLength == NULL) {
+        OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INVALID_RESPONSE_DATA,
+            OPGP_stringify_error(OPGP_ERROR_INVALID_RESPONSE_DATA));
+        goto end;
+    }
+
 
 	// trivial case, just return
 	if (secInfo == NULL || secInfo->secureChannelProtocol == 0 || secInfo->secureChannelProtocol == GP211_SCP01
@@ -2852,7 +2859,13 @@ OPGP_ERROR_STATUS GP211_check_R_MAC(PBYTE apduCommand, DWORD apduCommandLength,
 //word: in this case only the status word shall be returned in the response. All status words except '9000' and
 //warning status words (i.e. '62xx' and '63xx') shall be interpreted as error status words.
 	if ((sw == 0x9000 || (sw >> 8) == 0x62 || (sw >> 8) == 0x63) || secInfo->secureChannelProtocol != GP211_SCP03) {
-		GP211_calculate_R_MAC(apduCommand, apduCommandLength, responseApdu, responseApduLength, secInfo, mac);
+		if (responseApduLength < 10 || apduCommand == NULL || apduCommandLength < 4) {
+            OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INVALID_RESPONSE_DATA,
+                OPGP_stringify_error(OPGP_ERROR_INVALID_RESPONSE_DATA));
+            goto end;
+        }
+        status = GP211_calculate_R_MAC(apduCommand, apduCommandLength, responseApdu, responseApduLength, secInfo, mac);
+        if (OPGP_ERROR_CHECK(status)) goto end;
 	#ifdef OPGP_DEBUG
 		OPGP_LOG_HEX(_T("check_R_MAC: received R-MAC: "), responseApdu+responseApduLength-10, 8);
 		OPGP_LOG_HEX(_T("check_R_MAC: calculated R-MAC: "), mac, 8);
@@ -2873,6 +2886,11 @@ OPGP_ERROR_STATUS GP211_check_R_MAC(PBYTE apduCommand, DWORD apduCommandLength,
 		*unwrappedResponseApduLength = responseApduLength - 8;
 	}
 	else {
+        if (*unwrappedResponseApduLength < responseApduLength) {
+            OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INSUFFICIENT_BUFFER,
+                OPGP_stringify_error(OPGP_ERROR_INSUFFICIENT_BUFFER));
+            goto end;
+        }
 		memmove(unwrappedResponseApdu, responseApdu, responseApduLength);
 		*unwrappedResponseApduLength = responseApduLength;
 	}

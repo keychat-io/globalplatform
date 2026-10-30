@@ -51,6 +51,16 @@ Useful CMake options:
 - `STATIC=ON`: build static variants only.
 - `GLOBALPLATFORM_ENABLE_ASAN=ON|OFF`: control AddressSanitizer in debug builds.
 - `GLOBALPLATFORM_BUILD_DOCS=ON`: build Doxygen docs during normal builds.
+- `GLOBALPLATFORM_WITH_PCSC=OFF` and `GLOBALPLATFORM_STATIC_CALLBACKS=ON`: callback-only static SDK profile; requires `STATIC=ON` and `TOOLS=OFF`.
+- `contrib/apple/build-apple.sh`: pinned OpenSSL and full arm64 iOS/Simulator links.
+- `contrib/apple/test-host.sh`: host static-callback, crypto initialization and boundary checks.
+- `globalplatform/tests/test-registry-host.sh`: registry ASan/UBSan and allocation-failure regressions.
+
+The static callback profile requires successful `OPGP_establish_context` after
+installing callbacks. Read `contrib/apple/README.md` for ABI, initialization,
+logging, artifact and license boundaries. Apple link checks are not device or
+card acceptance. `contrib/qualification/` records the independent SCP probe and
+the unresolved SCP03 S16 compatibility gap.
 
 Dependencies commonly needed on Linux: C compiler, CMake, pkg-config, PC/SC Lite development headers, OpenSSL 3, zlib, cmocka, pandoc, Doxygen, and Graphviz.
 

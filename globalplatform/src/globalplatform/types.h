@@ -35,7 +35,20 @@
 #ifndef OPGP_TYPES_H
 #define OPGP_TYPES_H
 
-#ifndef _WIN32
+#if defined(OPGP_NO_PCSC) && !defined(_WIN32)
+#include <stddef.h>
+#include <stdint.h>
+
+/* Fixed-width callback ABI; independent of PC/SC headers and platform longs. */
+typedef uint8_t BYTE;
+typedef uint16_t USHORT;
+typedef uint32_t DWORD;
+typedef int32_t LONG;
+typedef int32_t BOOL;
+typedef DWORD *PDWORD;
+typedef char *LPTSTR;
+typedef const char *LPCTSTR;
+#elif !defined(_WIN32)
 #include <wintypes.h>
 
 #ifndef LPTSTR
@@ -62,7 +75,7 @@ typedef LPDWORD PDWORD; //!< A Microsoft LPDWORD/Muscle pointer to a double word
 typedef char *OPGP_STRING; //!< A Microsoft/Muscle LPTSTR.
 typedef const char *OPGP_CSTRING; //!< A Microsoft/Muscle LPCTSTR.
 typedef unsigned char *PBYTE; //!< A Microsoft/Muscle LPBYTE, pointer to unsigned char.
-#if !defined(__wintypes_h__)
+#if !defined(OPGP_NO_PCSC) && !defined(__wintypes_h__)
 typedef unsigned long *PDWORD; //!< A Microsoft LPDWORD/Muscle pointer to a DWORD.
 typedef unsigned char BYTE; //!< A Microsoft/Muscle BYTE definition.
 typedef unsigned long DWORD; //!< A Microsoft/Muscle DWORD definition.
