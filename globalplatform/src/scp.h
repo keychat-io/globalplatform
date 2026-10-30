@@ -47,11 +47,11 @@ extern "C"
 
 typedef struct {
 	BYTE keyInformationDataLength;
-	BYTE cardChallenge[8];
+	BYTE cardChallenge[16];
 	BYTE cardChallengeLength;
 	BYTE sequenceCounter[3];
 	BYTE sequenceCounterLength;
-	BYTE cardCryptogram[8];
+	BYTE cardCryptogram[16];
 } SCP_INITIALIZE_UPDATE_RESPONSE;
 
 typedef struct {
@@ -59,6 +59,7 @@ typedef struct {
 	DWORD lc;
 	DWORD wrappedLength;
 	DWORD paddingSize;
+	DWORD macLength;
 	DWORD headerLength;
 	BOOL isExtended;
 } SCP_WRAP_COMMAND_CONTEXT;

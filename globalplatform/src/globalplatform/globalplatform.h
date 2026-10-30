@@ -449,6 +449,7 @@ typedef struct {
 	OPGP_AID aid;
 	BYTE lifeCycleState;
 	BOOL privilegesPresent;
+	BYTE privilegesLength; //!< Original C5 length (0, 1 or 3); legacy present privileges have length 1.
 	GP211_APPLICATION_PRIVILEGES privileges;
 	BOOL associatedSecurityDomainAIDPresent;
 	OPGP_AID associatedSecurityDomainAID;
@@ -872,6 +873,7 @@ OPGP_ERROR_STATUS GP211_get_status(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO
  * AIDs must have 5..16 bytes. Applications/ISD require 4F, 9F70 and C5
  * (C5 00 is an explicit empty privilege set); load files require 4F and 9F70.
  * Known singleton fields may not repeat. Modules and entry AIDs must be unique.
+ * Legacy load-file records require the reserved privilege-position byte to be zero.
  * CE presence and arbitrary bounded nonempty raw bytes survive; empty CE is invalid.
  * Limits above fail closed; no partial result is returned. This validates the
  * returned format, not whether a card's legacy format exposes every optional fact.
@@ -879,6 +881,18 @@ OPGP_ERROR_STATUS GP211_get_status(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO
 OPGP_API
 OPGP_ERROR_STATUS GP211_get_status_ex(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo,
 		GP211_SECURITY_INFO *secInfo, BYTE cardElement, BYTE format, GP211_REGISTRY_DATA **registry);
+
+/**
+ * Parse a complete GET STATUS data stream without transport I/O. Status words
+ * must already be removed. The same scope, format, field and byte/entry limits
+ * as GP211_get_status_ex() apply, including exactly one Issuer Security Domain.
+ * data may be NULL only when dataLength is zero. *registry must be NULL on entry
+ * and remains NULL on failure. The result owns a copy of data and is released
+ * with GP211_free_status(); pointers in entries remain valid until then.
+ */
+OPGP_API
+OPGP_ERROR_STATUS GP211_parse_status_buffer(const BYTE *data, DWORD dataLength,
+		BYTE cardElement, BYTE format, GP211_REGISTRY_DATA **registry);
 
 /** Release a result from GP211_get_status_ex(); NULL is permitted. */
 OPGP_API
@@ -935,6 +949,27 @@ OPGP_ERROR_STATUS GP211_mutual_authentication(OPGP_CARD_CONTEXT cardContext, OPG
                            PBYTE certOceEcka, DWORD certOceEckaLength,
                            PBYTE sdPublicKeyOverride, DWORD sdPublicKeyOverrideLength,
                            OPGP_STRING sdPublicKeyFileName,
+                           GP211_SECURITY_INFO *secInfo);
+
+/**
+ * Same contract as GP211_mutual_authentication(), with an optional caller challenge.
+ * NULL with length zero generates a fresh challenge using the SDK CSPRNG.
+ * A supplied challenge must be fresh and exactly 8 bytes (SCP01/02, SCP03 S8)
+ * or 16 bytes (explicit SCP03 with implementation bit GP211_SCP03_IMPL_S16).
+ * Malformed lengths fail before sending any APDU. No retry or downgrade occurs.
+ * SCP11 accepts only NULL with length zero. The security-info ABI is unchanged.
+ */
+OPGP_API
+OPGP_ERROR_STATUS GP211_mutual_authentication_with_challenge(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo,
+                           PBYTE baseKeyOrStaticOcePrivateKey, PBYTE S_ENC, PBYTE S_MAC,
+                           PBYTE DEK, DWORD keyLength, BYTE keySetVersion,
+                           BYTE keyIndex, BYTE secureChannelProtocol,
+                           BYTE secureChannelProtocolImpl,
+                           BYTE securityLevel, BYTE derivationMethod,
+                           PBYTE certOceEcka, DWORD certOceEckaLength,
+                           PBYTE sdPublicKeyOverride, DWORD sdPublicKeyOverrideLength,
+                           OPGP_STRING sdPublicKeyFileName,
+                           PBYTE suppliedHostChallenge, DWORD suppliedHostChallengeLength,
                            GP211_SECURITY_INFO *secInfo);
 
 //! \brief GlobalPlatform2.1.1: Inits a Secure Channel implicitly.
@@ -1129,6 +1164,19 @@ OPGP_ERROR_STATUS GP211_delete_application(OPGP_CARD_CONTEXT cardContext, OPGP_C
 				   GP211_RECEIPT_DATA *receiptData, PDWORD receiptDataAvailable,
 				   PBYTE deleteToken, DWORD deleteTokenLength);
 
+/** Same contract as GP211_delete_application(), with explicit deletion scope.
+ * deleteRelatedObjects selects P2=80 when true, P2=00 when false. The legacy API
+ * preserves its P2=80 default. Callers must review the intended card impact;
+ * no fallback, scope expansion, or retry is performed. Any supplied delete token
+ * must have been signed for the selected scope.
+ */
+OPGP_API
+OPGP_ERROR_STATUS GP211_delete_application_ex(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo,
+        GP211_SECURITY_INFO *secInfo, OPGP_AID *AIDs, DWORD AIDsLength,
+        GP211_RECEIPT_DATA *receiptData, PDWORD receiptDataAvailable,
+        PBYTE deleteToken, DWORD deleteTokenLength, BOOL deleteRelatedObjects);
+
+
 //! \brief GlobalPlatform2.1.1: Prepares the card for loading an application.
 OPGP_API
 OPGP_ERROR_STATUS GP211_install_for_load(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo, GP211_SECURITY_INFO *secInfo,
@@ -1257,6 +1305,16 @@ OPGP_ERROR_STATUS GP211_calculate_load_file_data_block_hash(OPGP_STRING executab
                                                             PBYTE hash, DWORD hashLength, BYTE hashType);
 
 //! \brief GlobalPlatform2.1.1: Loads a Executable Load File (containing an application) to the card.
+/**
+ * Build one unprotected short LOAD block without transport or session mutation.
+ * dataLength must be 1..255; the final block includes Le=00, as GP211_load().
+ * commandLength is capacity on input and encoded length on success. Insufficient
+ * capacity reports the required length without writing the output buffer.
+ */
+OPGP_API
+OPGP_ERROR_STATUS GP211_build_load_block(PBYTE data, DWORD dataLength, BYTE blockNumber,
+        BOOL last, PBYTE command, PDWORD commandLength);
+
 OPGP_API
 OPGP_ERROR_STATUS GP211_load(OPGP_CARD_CONTEXT cardContext, OPGP_CARD_INFO cardInfo, GP211_SECURITY_INFO *secInfo,
 				 GP211_DAP_BLOCK *dapBlock, DWORD dapBlockLength, OPGP_STRING executableLoadFileName,
