@@ -38,9 +38,11 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <openssl/objects.h>
 
 #include "scp.h"
+#include <openssl/crypto.h>
 #include "crypto.h"
 #include "util.h"
 #include "globalplatform/debug.h"
@@ -320,26 +322,32 @@ static OPGP_ERROR_STATUS scp03_parse_initialize_update_response(
 		PBYTE recvBuffer,
 		DWORD recvBufferLength,
 		SCP_INITIALIZE_UPDATE_RESPONSE *response) {
-	if (!*secureChannelProtocolImpl) {
-		*secureChannelProtocolImpl = keyInformationData[2];
+	BYTE implementation = keyInformationData[2];
+	DWORD challengeLength = (implementation & GP211_SCP03_IMPL_S16) ? 16 : 8;
+	DWORD expectedLength = 15 + 2 * challengeLength + ((implementation & 0x10) ? 3 : 0);
+	/* Amendment D v1.2 Table 5-1: b8/b4/b3/b2 are reserved;
+	 * response encryption requires response MAC support. */
+	if ((implementation & 0x8E) || ((implementation & 0x40) && !(implementation & 0x20))) {
+		return scp_create_error(GP211_ERROR_INVALID_SCP_IMPL);
 	}
-	else if (*secureChannelProtocolImpl != keyInformationData[2]) {
+	if (recvBufferLength != expectedLength) {
+		return scp_create_error(OPGP_ERROR_INVALID_RESPONSE_DATA);
+	}
+	if (*secureChannelProtocolImpl && *secureChannelProtocolImpl != implementation) {
 		return scp_create_error(GP211_ERROR_INCONSISTENT_SCP_IMPL);
 	}
-
-	if (securityLevel == GP211_SCP03_SECURITY_LEVEL_C_DEC_C_MAC_R_MAC ||
-			securityLevel == GP211_SCP03_SECURITY_LEVEL_C_DEC_R_ENC_C_MAC_R_MAC ||
-			securityLevel == GP211_SCP03_SECURITY_LEVEL_C_MAC_R_MAC) {
+	*secureChannelProtocolImpl = implementation;
+	/* Response protection is not qualified by this authentication API. */
+	if (securityLevel & 0x30) {
 		return scp_create_error(OPGP_ERROR_SCP03_SECURITY_R_ENCRYPTION_R_MAC_NOT_SUPPORTED);
 	}
-
 	response->keyInformationDataLength = 3;
-	response->cardChallengeLength = 8;
-	memcpy(response->cardChallenge, recvBuffer+13, 8);
-	memcpy(response->cardCryptogram, recvBuffer+21, 8);
-	if (recvBufferLength == 34) {
+	response->cardChallengeLength = (BYTE)challengeLength;
+	memcpy(response->cardChallenge, recvBuffer + 13, challengeLength);
+	memcpy(response->cardCryptogram, recvBuffer + 13 + challengeLength, challengeLength);
+	if (implementation & 0x10) {
 		response->sequenceCounterLength = 3;
-		memcpy(response->sequenceCounter, recvBuffer+29, 3);
+		memcpy(response->sequenceCounter, recvBuffer + 13 + 2 * challengeLength, 3);
 	}
 	return scp_no_error();
 }
@@ -357,6 +365,10 @@ OPGP_ERROR_STATUS scp_parse_initialize_update_response(
 	}
 
 	memset(response, 0, sizeof(*response));
+	if ((secureChannelProtocol == GP211_SCP03 && recvBufferLength < 15) ||
+			((secureChannelProtocol == GP211_SCP01 || secureChannelProtocol == GP211_SCP02) && recvBufferLength != 30)) {
+		return scp_create_error(OPGP_ERROR_INVALID_RESPONSE_DATA);
+	}
 
 	if (secureChannelProtocol == GP211_SCP03) {
 		return scp03_parse_initialize_update_response(secureChannelProtocolImpl, securityLevel, keyInformationData,
@@ -458,35 +470,36 @@ static OPGP_ERROR_STATUS scp03_derive_session_keys(
 		PBYTE hostChallenge,
 		const SCP_INITIALIZE_UPDATE_RESPONSE *response) {
 	OPGP_ERROR_STATUS status;
-	BYTE calculatedCardChallenge[8];
+	BYTE calculatedCardChallenge[16];
+	DWORD n = response->cardChallengeLength;
 
 	/* compare card challenge value when calculated from pseudo random value */
 	if ((secInfo->secureChannelProtocolImpl & 0x10) != 0) {
-		if (secInfo->invokingAidLength == 0) {
+		if (secInfo->invokingAidLength < 5 || secInfo->invokingAidLength > sizeof(secInfo->invokingAid)) {
 			return scp_create_error(GP211_ERROR_MISSING_SD_AID);
 		}
-		status = calculate_card_challenge_SCP03(sEnc, keyLength, (PBYTE)response->sequenceCounter,
-				secInfo->invokingAid, secInfo->invokingAidLength, calculatedCardChallenge);
+		status = calculate_cryptogram_SCP03(sEnc, keyLength, 0x02, (PBYTE)response->sequenceCounter, 3,
+				secInfo->invokingAid, secInfo->invokingAidLength, calculatedCardChallenge, n * 8);
 		if (OPGP_ERROR_CHECK(status)) {
 			return status;
 		}
-		if (memcmp(response->cardChallenge, calculatedCardChallenge, 8) != 0) {
+		if (CRYPTO_memcmp(response->cardChallenge, calculatedCardChallenge, n) != 0) {
 			return scp_create_error(GP211_ERROR_INCORRECT_CARD_CHALLENGE);
 		}
 	}
 
-	status = create_session_key_SCP03(sEnc, keyLength, S_ENC_DerivationConstant_SCP03, (PBYTE)response->cardChallenge,
-			hostChallenge, secInfo->encryptionSessionKey);
+	status = calculate_cryptogram_SCP03(sEnc, keyLength, S_ENC_DerivationConstant_SCP03, hostChallenge, n,
+			(PBYTE)response->cardChallenge, n, secInfo->encryptionSessionKey, keyLength * 8);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
-	status = create_session_key_SCP03(sMac, keyLength, S_MAC_DerivationConstant_SCP03, (PBYTE)response->cardChallenge,
-			hostChallenge, secInfo->C_MACSessionKey);
+	status = calculate_cryptogram_SCP03(sMac, keyLength, S_MAC_DerivationConstant_SCP03, hostChallenge, n,
+			(PBYTE)response->cardChallenge, n, secInfo->C_MACSessionKey, keyLength * 8);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
-	status = create_session_key_SCP03(sMac, keyLength, S_RMAC_DerivationConstant_SCP03, (PBYTE)response->cardChallenge,
-			hostChallenge, secInfo->R_MACSessionKey);
+	status = calculate_cryptogram_SCP03(sMac, keyLength, S_RMAC_DerivationConstant_SCP03, hostChallenge, n,
+			(PBYTE)response->cardChallenge, n, secInfo->R_MACSessionKey, keyLength * 8);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
@@ -538,14 +551,15 @@ static OPGP_ERROR_STATUS scp03_verify_card_cryptogram(
 		PBYTE hostChallenge,
 		const SCP_INITIALIZE_UPDATE_RESPONSE *response) {
 	OPGP_ERROR_STATUS status;
-	BYTE cardCryptogramVer[8];
+	BYTE cardCryptogramVer[16];
+	DWORD n = response->cardChallengeLength;
 
-	status = calculate_card_cryptogram_SCP03(secInfo->C_MACSessionKey, keyLength, (PBYTE)response->cardChallenge,
-			hostChallenge, cardCryptogramVer);
+	status = calculate_cryptogram_SCP03(secInfo->C_MACSessionKey, keyLength, 0x00, hostChallenge, n,
+			(PBYTE)response->cardChallenge, n, cardCryptogramVer, n * 8);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
-	if (memcmp(response->cardCryptogram, cardCryptogramVer, 8) != 0) {
+	if (CRYPTO_memcmp(response->cardCryptogram, cardCryptogramVer, n) != 0) {
 		return scp_create_error(OPGP_ERROR_CARD_CRYPTOGRAM_VERIFICATION);
 	}
 	return scp_no_error();
@@ -659,15 +673,22 @@ static OPGP_ERROR_STATUS scp03_prepare_external_authentication(
 		PBYTE hostCryptogram,
 		PBYTE mac) {
 	OPGP_ERROR_STATUS status;
-	BYTE commandHeader[13];
+	BYTE commandHeader[21];
+	DWORD n = response->cardChallengeLength;
 
-	status = calculate_host_cryptogram_SCP03(secInfo->C_MACSessionKey, keyLength, (PBYTE)response->cardChallenge, hostChallenge, hostCryptogram);
+	status = calculate_cryptogram_SCP03(secInfo->C_MACSessionKey, keyLength, 0x01, hostChallenge, n,
+			(PBYTE)response->cardChallenge, n, hostCryptogram, n * 8);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
 
-	scp_build_external_auth_header(securityLevel, hostCryptogram, commandHeader);
-	status = calculate_CMAC_aes(secInfo->C_MACSessionKey, keyLength, commandHeader, sizeof(commandHeader), (PBYTE)SCP03_ICV, mac);
+	commandHeader[0] = 0x84;
+	commandHeader[1] = 0x82;
+	commandHeader[2] = securityLevel;
+	commandHeader[3] = 0;
+	commandHeader[4] = (BYTE)(2 * n);
+	memcpy(commandHeader + 5, hostCryptogram, n);
+	status = calculate_CMAC_aes(secInfo->C_MACSessionKey, keyLength, commandHeader, 5 + n, (PBYTE)SCP03_ICV, mac);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
@@ -917,20 +938,20 @@ static void scp_update_modified_apdu_header(PBYTE apduCommand, PBYTE wrappedApdu
 			if (context->isExtended) {
 				wrappedApduCommand[4] = 0;
 				wrappedApduCommand[5] = 0;
-				wrappedApduCommand[6] = 0x08;
+				wrappedApduCommand[6] = (BYTE)context->macLength;
 			} else {
-				wrappedApduCommand[4] = 0x08;
+				wrappedApduCommand[4] = (BYTE)context->macLength;
 			}
 			break;
 		}
 		case 3:
 		case 4: {
 			if (context->isExtended) {
-				DWORD newLc = ((wrappedApduCommand[5] << 8) | wrappedApduCommand[6]) + 8;
+				DWORD newLc = ((wrappedApduCommand[5] << 8) | wrappedApduCommand[6]) + context->macLength;
 				wrappedApduCommand[5] = (BYTE)(newLc >> 8);
 				wrappedApduCommand[6] = (BYTE)(newLc & 0xFF);
 			} else {
-				wrappedApduCommand[4] += 8;
+				wrappedApduCommand[4] += (BYTE)context->macLength;
 			}
 			break;
 		}
@@ -1089,8 +1110,10 @@ static OPGP_ERROR_STATUS scp02_wrap_command(
 	memcpy(secInfo->lastC_MAC, mac, 8);
 	memcpy(wrappedApduCommand + context->wrappedLength - 8, mac, 8);
 
-	if (secInfo->securityLevel == GP211_SCP02_SECURITY_LEVEL_C_DEC_C_MAC
-			|| secInfo->securityLevel == GP211_SCP02_SECURITY_LEVEL_C_DEC_C_MAC_R_MAC) {
+	/* GP Card Specification E.4.6 encrypts the original command data field;
+	 * case-1/case-2 commands have no such field (as in GPPro SCP02Wrapper). */
+	if (context->lc > 0 && (secInfo->securityLevel == GP211_SCP02_SECURITY_LEVEL_C_DEC_C_MAC
+			|| secInfo->securityLevel == GP211_SCP02_SECURITY_LEVEL_C_DEC_C_MAC_R_MAC)) {
 		status = calculate_enc_cbc_SCP02(secInfo->encryptionSessionKey,
 				wrappedApduCommand + context->headerLength, context->lc, encryption, encryptionLength);
 		if (OPGP_ERROR_CHECK(status)) {
@@ -1115,6 +1138,12 @@ static OPGP_ERROR_STATUS scp03_wrap_command(
 	OPGP_ERROR_STATUS status;
 	BYTE ENC_ICV[32] = {0};
 
+	/* The public counter stores the low 32 bits; never allow IV reuse. */
+	if ((secInfo->securityLevel & 0x02) &&
+			((uint32_t)secInfo->sessionEncryptionCounter == 0)) {
+		return scp_create_error(OPGP_ERROR_CRYPT);
+	}
+
 	scp_update_modified_apdu_header(apduCommand, wrappedApduCommand, context);
 
 	/* SCP03 with encryption encrypts first, calculates C-MAC afterwards. */
@@ -1135,11 +1164,11 @@ static OPGP_ERROR_STATUS scp03_wrap_command(
 			memcpy(wrappedApduCommand + context->headerLength, encryption, *encryptionLength);
 			scp_add_padding_to_lc(wrappedApduCommand, context);
 		}
-		secInfo->sessionEncryptionCounter++;
+		secInfo->sessionEncryptionCounter = (LONG)(uint32_t)((uint32_t)secInfo->sessionEncryptionCounter + 1U);
 	}
 
 	status = calculate_CMAC_aes(secInfo->C_MACSessionKey, secInfo->keyLength, wrappedApduCommand,
-			context->wrappedLength - 8, secInfo->lastC_MAC, mac);
+			context->wrappedLength - context->macLength, secInfo->lastC_MAC, mac);
 	if (OPGP_ERROR_CHECK(status)) {
 		return status;
 	}
@@ -1148,7 +1177,7 @@ static OPGP_ERROR_STATUS scp03_wrap_command(
 	OPGP_LOG_HEX(_T("wrap_command: Generated MAC: "), mac, 16);
 
 	memcpy(secInfo->lastC_MAC, mac, 16);
-	memcpy(wrappedApduCommand + context->wrappedLength - 8, mac, 8);
+	memcpy(wrappedApduCommand + context->wrappedLength - context->macLength, mac, context->macLength);
 
 	return scp_no_error();
 }

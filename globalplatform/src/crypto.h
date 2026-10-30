@@ -155,6 +155,11 @@ OPGP_ERROR_STATUS calculate_host_cryptogram_SCP02(BYTE S_ENCSessionKey[16],
 							BYTE hostCryptogram[8]);
 
 OPGP_NO_API
+OPGP_ERROR_STATUS calculate_cryptogram_SCP03(BYTE key[32], DWORD keyLength, BYTE derivationConstant,
+    PBYTE context1, DWORD context1Length, PBYTE context2, DWORD context2Length,
+    PBYTE cryptogram, DWORD cryptogramSize);
+
+OPGP_NO_API
 OPGP_ERROR_STATUS create_session_key_SCP03(BYTE key[32], DWORD keyLength, BYTE derivationConstant, BYTE cardChallenge[8],
 						   BYTE hostChallenge[8], PBYTE sessionKey);
 

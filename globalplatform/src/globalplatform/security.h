@@ -119,6 +119,10 @@ extern "C"
 
 /** Secure Channel Protocol '03': "i" '00': Random card challenge, No R-MAC, no R-ENCRYPTION.
   */
+#define GP211_SCP03_IMPL_S16 0x01 //!< SCP03 S16 mode: 16-byte challenges, cryptograms and MACs.
+#define GP211_SCP03_IMPL_i01 0x01 //!< SCP03 S16 with random card challenge.
+#define GP211_SCP03_IMPL_i11 0x11 //!< SCP03 S16 with pseudo-random card challenge.
+
 #define GP211_SCP03_IMPL_i00 0x00
 	/**
 	* Secure Channel Protocol '03': "i" '10': Pseudo-random card challenge, no R-MAC support, no R-ENCRYPTION support.

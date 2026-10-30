@@ -170,7 +170,7 @@ static void good_fields(void) {
     tlv(&value, 0xCE, version, sizeof(version)); tlv(&value, 0xD0, version, sizeof(version)); record(&value);
     GP211_REGISTRY_DATA *result = accept(1);
     GP211_REGISTRY_ENTRY *entry = &result->entries[0];
-    assert(entry->privilegesPresent && entry->privileges == 0);
+    assert(entry->privilegesPresent && entry->privilegesLength == 0 && entry->privileges == 0);
     assert(entry->executableLoadFileAIDPresent && entry->executableLoadFileAID.AID[4] == 2);
     assert(entry->associatedSecurityDomainAIDPresent && entry->associatedSecurityDomainAID.AIDLength == 16);
     assert(entry->versionNumberPresent && entry->versionNumberLength == sizeof(version));
@@ -185,7 +185,8 @@ static void good_fields(void) {
     GP211_free_status(NULL);
     for (unsigned length = 1; length <= 3; length += 2) {
         setup(0x40, 2); value = body(1, 0); tlv(&value, 0xC5, version, length); record(&value);
-        result = accept(1); assert(result->entries[0].privileges == (length == 1 ? 0xE10000 : 0xE1007F)); GP211_free_status(result);
+        result = accept(1); assert(result->entries[0].privilegesLength == length);
+        assert(result->entries[0].privileges == (length == 1 ? 0xE10000 : 0xE1007F)); GP211_free_status(result);
     }
 }
 static void invalid_fields(void) {
@@ -315,6 +316,66 @@ static void entry_and_version_limits(void) {
     setup(0x40, 1); reject(); assert(calls == 0);
     setup(0x30, 2); reject(); assert(calls == 0);
 }
+static void assembled_response_limits(void) {
+    static BYTE version[GP211_STATUS_MAX_BYTES - 21];
+    setup(0x40, 2); Buffer value = body(1, 1);
+    tlv(&value, 0xCE, version, sizeof(version)); record(&value);
+    assert(payload.length == GP211_STATUS_MAX_BYTES);
+    /* One ISO 7816 assembled callback response may exceed a short APDU page. */
+    chunkSize = GP211_STATUS_MAX_BYTES;
+    GP211_REGISTRY_DATA *result = accept(1);
+    assert(calls == 1 && result->entries[0].versionNumberLength == sizeof(version));
+    GP211_free_status(result);
+    cursor = 0; calls = 0; chunkSize = GP211_STATUS_MAX_BYTES - 1;
+    GP211_free_status(accept(1)); assert(calls == 2);
+    /* The larger callback buffer does not increase the complete-query limit. */
+    byte(&payload, 0); cursor = 0; calls = 0; chunkSize = GP211_STATUS_MAX_BYTES;
+    reject(); assert(calls == 2);
+}
+static void public_buffer_parser(void) {
+    GP211_REGISTRY_DATA *result = NULL;
+    BYTE version[] = {1, 2, 3};
+    setup(0x80, 2); Buffer value = body(1, 1);
+    tlv(&value, 0xCE, version, sizeof(version)); record(&value);
+    OPGP_ERROR_STATUS status = GP211_parse_status_buffer(payload.bytes, payload.length, 0x80, 2, &result);
+    assert(!OPGP_ERROR_CHECK(status) && result != NULL && result->count == 1 && calls == 0);
+    assert(result->responseData != payload.bytes && result->responseDataLength == payload.length);
+    assert(result->entries[0].versionNumber >= result->responseData &&
+        result->entries[0].versionNumber + sizeof(version) <= result->responseData + result->responseDataLength);
+    memset(payload.bytes, 0, payload.length);
+    assert(!memcmp(result->entries[0].versionNumber, version, sizeof(version))); tests++;
+    GP211_REGISTRY_DATA *original = result;
+    status = GP211_parse_status_buffer(NULL, 0, 0x40, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == original); tests++; GP211_free_status(result); result = NULL;
+    status = GP211_parse_status_buffer(NULL, 0, 0x40, 2, &result);
+    assert(!OPGP_ERROR_CHECK(status) && result->count == 0); tests++; GP211_free_status(result); result = NULL;
+    status = GP211_parse_status_buffer(NULL, 0, 0x80, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL); tests++;
+    status = GP211_parse_status_buffer(NULL, 1, 0x40, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL); tests++;
+    status = GP211_parse_status_buffer(payload.bytes, GP211_STATUS_MAX_BYTES + 1, 0x40, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL); tests++;
+    status = GP211_parse_status_buffer(NULL, 0, 0x30, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL); tests++;
+    status = GP211_parse_status_buffer(NULL, 0, 0x40, 1, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL); tests++;
+    status = GP211_parse_status_buffer(NULL, 0, 0x40, 2, NULL);
+    assert(OPGP_ERROR_CHECK(status)); tests++;
+    setup(0x40, 2); value = body(1, 1); record(&value); record(&value);
+    status = GP211_parse_status_buffer(payload.bytes, payload.length, 0x40, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL && activeAllocations == 0); tests++;
+    setup(0x40, 2); value = body(1, 1); record(&value); byte(&payload, 0xE3);
+    status = GP211_parse_status_buffer(payload.bytes, payload.length, 0x40, 2, &result);
+    assert(OPGP_ERROR_CHECK(status) && result == NULL && activeAllocations == 0); tests++;
+#ifdef GP_REGISTRY_TEST_ALLOCATIONS
+    for (size_t failure = 1; failure <= 3; failure++) {
+        setup(0x80, 2); value = body(1, 1); record(&value); failAllocation = failure;
+        status = GP211_parse_status_buffer(payload.bytes, payload.length, 0x80, 2, &result);
+        assert(OPGP_ERROR_CHECK(status) && status.errorCode == OPGP_ERROR_INSUFFICIENT_BUFFER &&
+            result == NULL && allocationCalls == failure && activeAllocations == 0); tests++;
+    }
+#endif
+}
 static OPGP_ERROR_STATUS old_read(GP211_APPLICATION_DATA *output, PDWORD count) {
     OPGP_CARD_CONTEXT context = test_context(); OPGP_CARD_INFO card = {0};
     OPGP_ERROR_STATUS status = GP211_get_status(context, card, NULL, 0x40, 2, output, NULL, count);
@@ -337,9 +398,10 @@ static void compatibility_and_allocation(void) {
     assert(OPGP_ERROR_CHECK(status) && count == 0 && calls == 0); tests++;
     status = old_read(output, NULL); assert(OPGP_ERROR_CHECK(status) && calls == 0); tests++;
 #ifdef GP_REGISTRY_TEST_ALLOCATIONS
-    for (size_t failure = 1; failure <= 4; failure++) {
+    for (size_t failure = 1; failure <= 6; failure++) {
         setup(0x40, 2); value = body(1, 1); BYTE raw[1100] = {0}; tlv(&value, 0xD0, raw, sizeof(raw)); record(&value);
         failAllocation = failure; reject(); assert(allocationCalls == failure);
+        if (failure == 1) assert(calls == 0);
     }
 #endif
     setup(0x40, 2); value = body(1, 1); record(&value);
@@ -354,7 +416,21 @@ static void legacy(void) {
         if (length < sizeof(data)) reject(); else GP211_free_status(accept(1));
     }
     setup(0x40, 0); memcpy(payload.bytes, data, sizeof(data)); payload.length = sizeof(data); chunkSize = 1;
-    GP211_REGISTRY_DATA *result = accept(1); assert(calls == sizeof(data) && result->entries[0].privilegesPresent); GP211_free_status(result);
+    GP211_REGISTRY_DATA *result = accept(1);
+    assert(calls == sizeof(data) && result->entries[0].privilegesPresent && result->entries[0].privilegesLength == 1);
+    GP211_free_status(result);
+    /* Legacy load-file privilege position is RFU and must be zero. */
+    const BYTE badReserved[] = {1, 0x80, 0xFF};
+    const BYTE loadElements[] = {0x20, 0x10};
+    for (unsigned scope = 0; scope < sizeof(loadElements); scope++) {
+        for (unsigned value = 0; value < sizeof(badReserved); value++) {
+            setup(loadElements[scope], 0);
+            memcpy(payload.bytes, data, sizeof(data));
+            payload.bytes[7] = badReserved[value]; payload.length = sizeof(data);
+            if (loadElements[scope] == 0x10) payload.bytes[payload.length++] = 0;
+            reject();
+        }
+    }
     data[0] = 4; setup(0x40, 0); memcpy(payload.bytes, data, sizeof(data)); payload.length = sizeof(data); reject();
     setup(0x10, 0); BYTE modules[] = {5,0xF0,0,0,0,1,7,0,1,5,0xF0,0,0,0,2};
     memcpy(payload.bytes, modules, sizeof(modules)); payload.length = sizeof(modules); result = accept(1);
@@ -372,7 +448,8 @@ int main(void) {
 #ifdef NDEBUG
 #error "Registry tests require assertions; compile without NDEBUG."
 #endif
-    good_fields(); invalid_fields(); paging_and_modules(); issuer_and_not_found(); entry_and_version_limits(); compatibility_and_allocation(); legacy();
+    good_fields(); invalid_fields(); paging_and_modules(); issuer_and_not_found(); entry_and_version_limits();
+    assembled_response_limits(); public_buffer_parser(); compatibility_and_allocation(); legacy();
     assert(activeAllocations == 0);
     printf("registry integrity: %u synthetic cases passed\n", tests);
     return 0;

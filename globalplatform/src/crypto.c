@@ -103,7 +103,7 @@ OPGP_ERROR_STATUS calculate_MAC_aes(BYTE key[32], DWORD keyLength, BYTE *message
 	* \param context1Length [in] The length of the context1 buffer.
     * \param context2 [in] The context2 for the internal key derivation.
 	* \param context2Length [in] The length of the context2 buffer.
-	* \param cryptogram [out] The calculated cryptogram. Must be large enough to hold the result. For session keys this is 128 bits, 64 bits otherwise.
+	* \param cryptogram [out] The calculated cryptogram. Must be large enough to hold the result. For session keys this is the AES key size; S8/S16 cryptograms use 64/128 bits.
     * \param cryptogramSize [in] The result size in bits of the cryptogram. Must be a multiple of 8.
     * \return OPGP_ERROR_STATUS struct with error status OPGP_ERROR_STATUS_SUCCESS if no error occurs, otherwise error code and error message are contained in the OPGP_ERROR_STATUS struct
     */
@@ -113,10 +113,18 @@ OPGP_ERROR_STATUS calculate_cryptogram_SCP03(BYTE key[32], DWORD keyLength, cons
 		BYTE derivationData[48];
 		BYTE mac[16];
 		DWORD i;
-		DWORD derivationDataLength = 16 + context1Length + context2Length;
+		DWORD derivationDataLength;
 		OPGP_LOG_START(_T("calculate_cryptogram_SCP03"));
 
-		memset(derivationData, 0, 48);
+		memset(derivationData, 0, sizeof(derivationData));
+		if (key == NULL || cryptogram == NULL || context1 == NULL || context2 == NULL ||
+				(keyLength != 16 && keyLength != 24 && keyLength != 32) ||
+				(cryptogramSize != 64 && cryptogramSize != 128 && cryptogramSize != 192 && cryptogramSize != 256) ||
+				context1Length > 32 || context2Length > 32 - context1Length) {
+			OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_CRYPT, OPGP_stringify_error(OPGP_ERROR_CRYPT));
+			goto end;
+		}
+		derivationDataLength = 16 + context1Length + context2Length;
 
 		// sanity check, this should never be more than 48 bytes
 		if (derivationDataLength > 48) {
@@ -143,12 +151,13 @@ OPGP_ERROR_STATUS calculate_cryptogram_SCP03(BYTE key[32], DWORD keyLength, cons
 				goto end;
 			}
 			// copy block size
-			memcpy(cryptogram + 16*i, mac, (cryptogramSize/8 > 16 ? 16 : cryptogramSize/8));
+			memcpy(cryptogram + 16*i, mac, (cryptogramSize/8 - 16*i > 16 ? 16 : cryptogramSize/8 - 16*i));
 		}
 
 		{ OPGP_ERROR_CREATE_NO_ERROR(status); goto end; }
 end:
-
+		OPENSSL_cleanse(derivationData, sizeof(derivationData));
+		OPENSSL_cleanse(mac, sizeof(mac));
 		OPGP_LOG_END(_T("calculate_cryptogram_SCP03"), status);
 		return status;
 }
@@ -156,7 +165,7 @@ end:
 /**
  * \brief Creates a MAC for commands (APDUs) using CMAC AES.
  * This is used by SCP03.
- * The MAC for the message is the first 8 Bytes of mac.
+ * The wire MAC is the first 8 bytes in S8 mode or all 16 bytes in S16 mode.
  * The next chainingValue is the full 16 Bytes of mac. Save this value for the next command MAC calculation.
  *
  * \param sMacKey [in] The S-MAC key (session MAC key) to use for MAC generation.
@@ -2086,7 +2095,9 @@ OPGP_ERROR_STATUS get_key_data_field(GP211_SECURITY_INFO *secInfo,
 		if (OPGP_ERROR_CHECK(status)) {
 			goto end;
 		}
-		if (encrypted_key_length != keyDataLength) {
+		/* Amendment D key blocks carry the clear key length even when an
+		 * AES key already fills whole cipher blocks. */
+		if (encrypted_key_length != keyDataLength || secInfo->secureChannelProtocol == GP211_SCP03) {
 			// + n byte key component length field
 			result = write_TLV_length(keyDataField, i, *keyDataFieldLength - i, (USHORT)(encrypted_key_length+1));
 			if (!result) {
@@ -2109,6 +2120,10 @@ OPGP_ERROR_STATUS get_key_data_field(GP211_SECURITY_INFO *secInfo,
 				goto end;
 			}
 			i+=result;
+		}
+		if (i > *keyDataFieldLength || encrypted_key_length > *keyDataFieldLength - i) {
+			OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INSUFFICIENT_BUFFER, OPGP_stringify_error(OPGP_ERROR_INSUFFICIENT_BUFFER));
+			goto end;
 		}
 		memcpy(keyDataField+i, encrypted_key, encrypted_key_length);
 		i+= encrypted_key_length;
@@ -2181,6 +2196,8 @@ OPGP_ERROR_STATUS wrap_command(PBYTE apduCommand, DWORD apduCommandLength, PBYTE
 	// padding is only needed for encryption
 	DWORD paddingSize = 0;
 	DWORD blockSize = 8;
+	DWORD macLength = (secInfo != NULL && secInfo->secureChannelProtocol == GP211_SCP03 &&
+			(secInfo->secureChannelProtocolImpl & GP211_SCP03_IMPL_S16)) ? 16 : 8;
 	BOOL isExtended = 0;
 	DWORD headerLength = 5;
 	SCP_WRAP_COMMAND_CONTEXT wrapContext;
@@ -2224,7 +2241,7 @@ OPGP_ERROR_STATUS wrap_command(PBYTE apduCommand, DWORD apduCommandLength, PBYTE
 	 * Note: SCP03 AES uses padding to 16 bytes * X. The pad is bigger.
 	 */
 	if (((lc > 0 && secInfo->secureChannelProtocol == GP211_SCP01 && secInfo->securityLevel == GP211_SCP01_SECURITY_LEVEL_C_DEC_C_MAC)
-		|| (secInfo->secureChannelProtocol == GP211_SCP02 &&
+		|| (lc > 0 && secInfo->secureChannelProtocol == GP211_SCP02 &&
 			(secInfo->securityLevel == GP211_SCP02_SECURITY_LEVEL_C_DEC_C_MAC
 					|| secInfo->securityLevel == GP211_SCP02_SECURITY_LEVEL_C_DEC_C_MAC_R_MAC))
 		|| (lc > 0 && secInfo->secureChannelProtocol == GP211_SCP03
@@ -2240,13 +2257,18 @@ OPGP_ERROR_STATUS wrap_command(PBYTE apduCommand, DWORD apduCommandLength, PBYTE
 		// padding 0x80 at least added or in SCP a length byte is prepended
 		paddingSize = ((blockSize - ((lc + 1) % blockSize)) % blockSize) + 1;
 	}
-	// add padding + 8 byte MAC
-	wrappedLength += paddingSize + 8;
+	// Add encryption padding and the protocol-specific wire MAC.
+	wrappedLength += paddingSize + macLength;
+	if ((!isExtended && lc + paddingSize + macLength > 255) ||
+			(isExtended && lc + paddingSize + macLength > 65535)) {
+		OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_COMMAND_SECURE_MESSAGING_TOO_LARGE, OPGP_stringify_error(OPGP_ERROR_COMMAND_SECURE_MESSAGING_TOO_LARGE));
+		goto end;
+	}
 	// there was no body before, add LC field length
 	if (caseAPDU == 1 || caseAPDU == 2) {
 		wrappedLength += headerLength - 4;
 	}
-	if (*wrappedApduCommandLength < wrappedLength) {
+	if (*wrappedApduCommandLength < wrappedLength + ((caseAPDU == 2 || caseAPDU == 4) ? (isExtended ? 2 : 1) : 0)) {
 		OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INSUFFICIENT_BUFFER, OPGP_stringify_error(OPGP_ERROR_INSUFFICIENT_BUFFER));
 		goto end;
 	}
@@ -2262,6 +2284,7 @@ OPGP_ERROR_STATUS wrap_command(PBYTE apduCommand, DWORD apduCommandLength, PBYTE
 	wrapContext.lc = lc;
 	wrapContext.wrappedLength = wrappedLength;
 	wrapContext.paddingSize = paddingSize;
+	wrapContext.macLength = macLength;
 	wrapContext.headerLength = headerLength;
 	wrapContext.isExtended = isExtended;
 
@@ -2646,6 +2669,13 @@ OPGP_ERROR_STATUS GP211_calculate_R_MAC(PBYTE apduCommand, DWORD apduCommandLeng
 	DWORD r_MacDataLength;
 	DWORD offset=0;
 	OPGP_LOG_START(_T("GP211_calculate_R_MAC"));
+	if (secInfo != NULL && secInfo->secureChannelProtocol == GP211_SCP03 &&
+			(secInfo->secureChannelProtocolImpl & GP211_SCP03_IMPL_S16)) {
+		OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_SCP03_SECURITY_R_ENCRYPTION_R_MAC_NOT_SUPPORTED,
+			OPGP_stringify_error(OPGP_ERROR_SCP03_SECURITY_R_ENCRYPTION_R_MAC_NOT_SUPPORTED));
+		goto end;
+	}
+
 	r_MacDataLength = apduCommandLength + responseApduLength + 10;
 	r_MacData = (PBYTE)malloc(r_MacDataLength);
 	if (r_MacData == NULL) {
@@ -2831,6 +2861,13 @@ OPGP_ERROR_STATUS GP211_check_R_MAC(PBYTE apduCommand, DWORD apduCommandLength,
 	BYTE mac[8];
 	DWORD sw;
 	OPGP_LOG_START(_T("GP211_check_R_MAC"));
+	if (secInfo != NULL && secInfo->secureChannelProtocol == GP211_SCP03 &&
+			(secInfo->secureChannelProtocolImpl & GP211_SCP03_IMPL_S16) && (secInfo->securityLevel & 0x30)) {
+		OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_SCP03_SECURITY_R_ENCRYPTION_R_MAC_NOT_SUPPORTED,
+			OPGP_stringify_error(OPGP_ERROR_SCP03_SECURITY_R_ENCRYPTION_R_MAC_NOT_SUPPORTED));
+		goto end;
+	}
+
     if (responseApdu == NULL || responseApduLength < 2 ||
         unwrappedResponseApdu == NULL || unwrappedResponseApduLength == NULL) {
         OPGP_ERROR_CREATE_ERROR(status, OPGP_ERROR_INVALID_RESPONSE_DATA,
